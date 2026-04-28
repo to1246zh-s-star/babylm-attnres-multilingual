@@ -1,0 +1,54 @@
+# --- Data / generated artifacts ---
+data/
+out/
+outputs/
+logs/
+log/
+*.log
+
+# HuggingFace checkpoints / exported model dirs (often large)
+hf_ckpt/
+checkpoints/
+checkpoint/
+ckpt/
+
+# --- Model weight files (use Git LFS if you need to version them) ---
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+pip-wheel-metadata/
+
+# --- Environments ---
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- OS / Editors ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Temp ---
+*.tmp
+*.swp
+*.swo
