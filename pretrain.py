@@ -58,15 +58,11 @@ def train_epoch(epoch):
         #for micro_step in range(gradient_accumulation_steps):
         if ddp:
             # in DDP training we only need to sync gradients at the last micro step.
-            # the official way to do this is with model.no_sync() context manager, but
-            # I really dislike that this bloats the code and forces us to repeat code
-            # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = 0 == gradient_accumulation_steps - 1
         with ctx:
             logits = model(X, Y)
             loss = raw_model.last_loss
             loss = loss / gradient_accumulation_steps
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
         #
@@ -104,62 +100,33 @@ def train_epoch(epoch):
                 torch.save(model.state_dict(),'{}/iter_{}.pth'.format(save_dir,int(step+epoch*iter_per_epoch)))
                 model.train()
 
-#@torch.no_grad()
-# def valid_epoch(epoch):
-#     global best_val_loss
-#     losses = []
-#     model.eval()
-#     for _, (X, Y) in enumerate(val_loader):
-#         X=X.to(device)
-#         Y=Y.to(device)
-#         with ctx:
-#             logits, loss = model(X, Y)
-#         losses.append(loss.item())
-#     model.train()
-#     val_loss=np.mean(losses)
-#     #
-#     logger.info('valid loss = {:.4f}'.format(val_loss))
-#     if val_loss < best_val_loss:
-#         best_val_loss = val_loss
-#         logger.info('best val_loss: {} best_epoch: {} '.format(best_val_loss,epoch))
-#         torch.save(raw_model.state_dict(),'{}/best.pth'.format(save_dir))
-#     #
-#     return val_loss
 
 def init_model():
-    # model init
     # model init
     model_args = dict(
         dim=dim,
         n_layers=n_layers,
         n_heads=n_heads,
         n_kv_heads=n_heads,
-        vocab_size=64793,
+        vocab_size=16000,                 # ★ aligned with Regex-BBPE 16K
         multiple_of=multiple_of,
         max_seq_len=max_seq_len,
         dropout=dropout,
-    )  # start with model_args from command line
+    )
     if init_from == "scratch":
-        # init a new model from scratch
         print("Initializing a new model from scratch")
         gptconf = ModelArgs(**model_args)
         model = Transformer(gptconf)
     elif init_from == "resume":
         print(f"Resuming training from {out_dir}")
-        # resume training from a checkpoint.
         ckpt_path = os.path.join(out_dir, "ckpt.pt")
         checkpoint = torch.load(ckpt_path, map_location=device)
         checkpoint_model_args = checkpoint["model_args"]
-        # force these config attributes to be equal otherwise we can't even resume training
-        # the rest of the attributes (e.g. dropout) can stay as desired from command line
         for k in ["dim", "n_layers", "n_heads", "n_kv_heads", "vocab_size", "multiple_of", "max_seq_len"]:
             model_args[k] = checkpoint_model_args[k]
-        # create the model
         gptconf = ModelArgs(**model_args)
         model = Transformer(gptconf)
         state_dict = checkpoint["model"]
-        # fix the keys of the state dictionary :(
-        # honestly no idea how checkpoints sometimes get this prefix, have to debug more
         unwanted_prefix = "_orig_mod."
         for k, v in list(state_dict.items()):
             if k.startswith(unwanted_prefix):
@@ -171,84 +138,73 @@ def init_model():
 # I/O
 if __name__=="__main__":
     out_dir = 'out'
-    max_epoch = 1
+    max_epoch = 10
     eval_interval = 1
     log_interval = 100
     # log_interval = 1  # smoke run
     save_interval = 1000
     # save_interval = 20  # smoke run
     eval_iters = 200
-    eval_only = False # if True, script exits right after the first eval
-    always_save_checkpoint = True # if True, always save a checkpoint after each eval
-    init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+    eval_only = False
+    always_save_checkpoint = True
+    init_from = 'scratch'
     #
-    gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-    batch_size = 32  # if gradient_accumulation_steps > 1, this is the micro-batch size
+    gradient_accumulation_steps = 1
+    batch_size = 32
     # batch_size = 4  # smoke run
-    # model 根据需要更改 
+    # model 
     max_seq_len = 512
     # max_seq_len = 256  # smoke run
     dim = 512
     n_layers = 8
     n_heads = 8
     multiple_of = 32
-    dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
-    bias = False # do we use bias inside LayerNorm and Linear layers?
+    dropout = 0.0
+    bias = False
     # adamw optimizer
-    learning_rate = 3e-4 # max learning rate
+    learning_rate = 3e-4
     weight_decay = 1e-1
     beta1 = 0.9
     beta2 = 0.95
-    grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+    grad_clip = 1.0
     # learning rate decay settings
-    decay_lr = True # whether to decay the learning rate
-    warmup_iters = 1000 # how many steps to warm up for
-    lr_decay_iters = 80000 # should be ~= max_iters per Chinchilla
-    min_lr = 1e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+    decay_lr = True
+    warmup_iters = 1000
+    lr_decay_iters = 60000               # ★ adjusted for ~10 epochs on 100M tokens (was 10000)
+    min_lr = 1e-5
     # DDP settings
-    backend = 'nccl' # 'nccl', 'gloo', etc.
+    backend = 'nccl'
     # system
-    device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-    dtype = 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-    compile = False # use PyTorch 2.0 to compile the model to be faster
+    device = 'cuda'
+    dtype = 'bfloat16'                   # ★ changed from 'float16' for stability
+    compile = False
     # -----------------------------------------------------------------------------
     config_keys = [
         k
         for k, v in globals().items()
         if not k.startswith("_") and isinstance(v, (int, float, bool, str))
     ]
-    # exec(open("configurator.py").read())  # overrides from command line or config file
-    # config = {k: globals()[k] for k in config_keys}  # will be useful for logging
     # -----------------------------------------------------------------------------
 
     save_dir =os.path.join(out_dir , 'pretrain')
     if not os.path.exists(save_dir): os.makedirs(save_dir)
     logger = get_logger(os.path.join(save_dir,'log.log'))
-    # various inits, derived attributes, I/O setup
-   # various inits, derived attributes, I/O setup
-    ddp = int(os.environ.get("RANK", -1)) != -1  # is this a ddp run?
+
+    ddp = int(os.environ.get("RANK", -1)) != -1
     
     if ddp:
-        # Check if the operating system is Windows
         if os.name == 'nt':
-            # Diff between backends: https://pytorch.org/docs/stable/distributed.html
             init_process_group(backend="gloo")
         else:
-            # If the operating system is Linux based, os.name == 'posix'
             init_process_group(backend="nccl")
         ddp_rank = int(os.environ["RANK"])
         ddp_local_rank = int(os.environ["LOCAL_RANK"])
         ddp_world_size = int(os.environ["WORLD_SIZE"])
         device = f"cuda:{ddp_local_rank}"
         torch.cuda.set_device(device)
-        master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
-        seed_offset = ddp_rank  # each process gets a different seed
-        # world_size number of processes will be training simultaneously, so we can scale
-        # down the desired gradient accumulation iterations per process proportionally
-        #assert gradient_accumulation_steps % ddp_world_size == 0
-        #gradient_accumulation_steps //= ddp_world_size
+        master_process = ddp_rank == 0
+        seed_offset = ddp_rank
     else:
-        # if not ddp, we are running on a single gpu, and one process
         master_process = True
         seed_offset = 0
         ddp_world_size = 1
@@ -260,28 +216,22 @@ if __name__=="__main__":
     if master_process:
         os.makedirs(out_dir, exist_ok=True)
     torch.manual_seed(1337 + seed_offset)
-    torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
-    torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
-    device_type = "cuda" if "cuda" in device else "cpu"  # for later use in torch.autocast
-    # note: float16 data type will automatically use a GradScaler
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    device_type = "cuda" if "cuda" in device else "cpu"
     ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[dtype]
     ctx = (
         nullcontext()
         if device_type == "cpu"
-        else torch.cuda.amp.autocast()
+        else torch.cuda.amp.autocast(dtype=ptdtype)   # ★ explicitly pass dtype for bf16
     )
     #
     best_val_loss = 1e9
     #
     #-----init dataloader------
     data_path_list=[
-        './data/merged_multilingual_zh4_en3_nl3_100m.bin'
-        # './data/_smoke.bin'  # smoke run
-        #'./data/baidubaike_563w.bin',
-        #'./data/medical_book.bin',
-        # './data/medical_encyclopedia.bin',
-        # './data/medical_qa.bin',
-        # './data/wiki.bin'
+        './data/merged_multilingual_100m.bin'        # ★ updated to new bin file
+        # './data/smoke_1m.bin'                       # smoke run
     ]
     train_ds = PretrainDataset(data_path_list, max_length=max_seq_len,memmap=True)
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_ds) if ddp else None
@@ -294,15 +244,6 @@ if __name__=="__main__":
         num_workers=0 if os.name == 'nt' else 4,
         sampler=train_sampler
     )
-    # val_ds = PretrainDataset(data_path_list, max_length=256)
-    # val_loader = torch.utils.data.DataLoader(
-    #     val_ds,
-    #     batch_size=batch_size,
-    #     pin_memory=False,
-    #     drop_last=False,
-    #     shuffle=False,        
-    #     num_workers=0,
-    # )
     #init model
     model=init_model()
     model.to(device)
@@ -314,23 +255,20 @@ if __name__=="__main__":
     if compile:
         print("compiling the model... (takes a ~minute)")
         unoptimized_model = model
-        model = torch.compile(model) # requires PyTorch 2.0
+        model = torch.compile(model)
     # wrap model into DDP container
     if ddp:
-        # Ignore the `freqs_cis` buffer so that DDP does not broadcast it at
-        # construction time since NCCL does not support `ComplexFloat`
         prefix = "_orig_mod." if compile else ""
         model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
         model = DDP(model, device_ids=[ddp_local_rank])
         #
-    raw_model = model.module if ddp else model # unwrap DDP container if needed
+    raw_model = model.module if ddp else model
     # training loop
     iter_per_epoch=len(train_loader)
     for epoch in range(max_epoch):
         train_epoch(epoch)
-        #val_loss=valid_epoch(epoch)
         if ddp:
-            if torch.distributed.get_rank() == 0:  #一般用0，当然，可以选任意的rank保存。
+            if torch.distributed.get_rank() == 0:
                 torch.save(raw_model.state_dict(),'{}/epoch_{}.pth'.format(save_dir,epoch))
         else:
             torch.save(raw_model.state_dict(),'{}/epoch_{}.pth'.format(save_dir,epoch))

@@ -324,4 +324,107 @@ class BabyLlamaKimiForCausalLM(PreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(self, input_ids, **kwargs):
         # no KV-cache implementation: always feed full context
         return {"input_ids": input_ids}
+cd /root/autodl-tmp/AttentionResidualLlama/out/hf_model_v1_100Mtokens
 
+# 备份
+cp modeling_babyllama_kimi.py modeling_babyllama_kimi.py.bak
+
+# 追加 SequenceClassification 类
+cat >> modeling_babyllama_kimi.py << 'EOF'
+
+
+# ============================================================
+# Sequence Classification Head (for BabyLM finetune evaluation)
+# ============================================================
+
+from transformers.modeling_outputs import SequenceClassifierOutputWithPast
+
+
+class BabyLlamaKimiForSequenceClassification(PreTrainedModel):
+    config_class = BabyLlamaKimiConfig
+    base_model_prefix = "model"
+    supports_gradient_checkpointing = False
+
+    def __init__(self, config: BabyLlamaKimiConfig):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+
+        args = ModelArgs(
+            dim=config.hidden_size,
+            n_layers=config.num_hidden_layers,
+            n_heads=config.num_attention_heads,
+            n_kv_heads=config.num_key_value_heads,
+            vocab_size=config.vocab_size,
+            multiple_of=config.multiple_of,
+            norm_eps=config.rms_norm_eps,
+            max_seq_len=config.max_position_embeddings,
+            dropout=config.dropout,
+        )
+        self.model = Transformer(args)
+
+        self.score = nn.Linear(config.hidden_size, self.num_labels, bias=False)
+
+        self.post_init()
+
+    def get_input_embeddings(self):
+        return self.model.tok_embeddings
+
+    def set_input_embeddings(self, value):
+        self.model.tok_embeddings = value
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        labels=None,
+        **kwargs,
+    ):
+        _bsz, seqlen = input_ids.shape
+        h = self.model.tok_embeddings(input_ids)
+        h = self.model.dropout(h)
+        freqs_cos = self.model.freqs_cos[:seqlen]
+        freqs_sin = self.model.freqs_sin[:seqlen]
+
+        history_states = [h]
+        for layer in self.model.layers:
+            h = layer(history_states, freqs_cos, freqs_sin)
+            history_states.append(h)
+
+        hidden_states = self.model.norm(h)
+
+        if attention_mask is not None:
+            sequence_lengths = attention_mask.sum(dim=-1) - 1
+            sequence_lengths = sequence_lengths.clamp(min=0)
+        else:
+            sequence_lengths = torch.full(
+                (input_ids.shape[0],), seqlen - 1, device=input_ids.device
+            )
+
+        batch_indices = torch.arange(input_ids.shape[0], device=input_ids.device)
+        pooled = hidden_states[batch_indices, sequence_lengths]
+
+        logits = self.score(pooled)
+
+        loss = None
+        if labels is not None:
+            if self.num_labels == 1:
+                loss = F.mse_loss(logits.squeeze(), labels.squeeze().float())
+            else:
+                loss = F.cross_entropy(logits.view(-1, self.num_labels), labels.view(-1))
+
+        return SequenceClassifierOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=None,
+            hidden_states=None,
+            attentions=None,
+        )
+EOF
+
+# 验证追加成功
+echo "=== 文件总行数 ==="
+wc -l modeling_babyllama_kimi.py
+
+echo ""
+echo "=== 末尾 60 行 ==="
+tail -60 modeling_babyllama_kimi.py

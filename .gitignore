@@ -1,54 +1,41 @@
-# --- Data / generated artifacts ---
-data/
+# Checkpoints and outputs (太大,不推)
 out/
-outputs/
-logs/
-log/
-*.log
-
-# HuggingFace checkpoints / exported model dirs (often large)
-hf_ckpt/
-checkpoints/
-checkpoint/
-ckpt/
-
-# --- Model weight files (use Git LFS if you need to version them) ---
-*.pt
+out_*/
 *.pth
-*.ckpt
+*.pt
 *.bin
 *.safetensors
-*.onnx
 
-# --- Python ---
+# Data files
+data/
+*.bin
+
+# Python
 __pycache__/
-*.py[cod]
-*.pyd
-*.so
+*.pyc
+*.pyo
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage.xml
-pip-wheel-metadata/
-
-# --- Environments ---
-.venv/
-venv/
-env/
-.env
-.env.*
-
-# --- Jupyter ---
+*.egg-info/
 .ipynb_checkpoints/
 
-# --- OS / Editors ---
+# HF cache
+.cache/
+hf_model_*/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
 .DS_Store
 Thumbs.db
-.idea/
-.vscode/
 
-# --- Temp ---
-*.tmp
-*.swp
-*.swo
+# Logs
+*.log
+nohup.out
+multilingual_pretrain_workflow_todo.md
+multilingual_pretrain_workflow_todo.md
+multilingual_pretrain_workflow_todo.md
+multilingual_pretrain_workflow_todo.md

@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
+"""
+Build a multilingual BabyLM pretraining bin file using a HuggingFace tokenizer.
+Modified to support HF tokenizers (e.g. Regex-Guided BBPE) instead of SentencePiece.
+"""
 import argparse
 from pathlib import Path
-
 import numpy as np
 from datasets import load_from_disk
-from sentencepiece import SentencePieceProcessor
+from transformers import AutoTokenizer
 from tqdm import tqdm
 
-
 DEFAULT_SOURCES = {
-    "zh": "./data/babylm/zho",
-    "en": "./data/babylm/eng_strict",
-    "nl": "./data/babylm/nld",
+    "zh": "/root/autodl-tmp/babylm-2026-multilingual/data/zho",
+    "en": "/root/autodl-tmp/babylm-2026-multilingual/data/eng",
+    "nl": "/root/autodl-tmp/babylm-2026-multilingual/data/nld",
 }
 
+# Equal split for fairness (BabyLM-aligned). Chinese byte premium ≈ 0.99, almost 1.
 DEFAULT_RATIOS = {
-    "zh": 4,
-    "en": 3,
-    "nl": 3,
+    "zh": 1,
+    "en": 1,
+    "nl": 1,
 }
 
 
@@ -46,7 +49,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output",
-        default="./data/merged_multilingual_zh4_en3_nl3_100m.bin",
+        default="./data/merged_multilingual_100m.bin",
         help="Output .bin path.",
     )
     parser.add_argument(
@@ -63,12 +66,12 @@ def parse_args():
     )
     parser.add_argument(
         "--tokenizer-path",
-        default="./chatglm_tokenizer/tokenizer.model",
-        help="SentencePiece tokenizer model path.",
+        default="/root/autodl-tmp/babylm-2026-multilingual/models/tokenizer_regex_bbpe",
+        help="HuggingFace tokenizer directory path (containing tokenizer.json).",
     )
-    parser.add_argument("--zh-path", default=DEFAULT_SOURCES["zh"], help="Saved Chinese dataset path.")
-    parser.add_argument("--en-path", default=DEFAULT_SOURCES["en"], help="Saved English dataset path.")
-    parser.add_argument("--nl-path", default=DEFAULT_SOURCES["nl"], help="Saved Dutch dataset path.")
+    parser.add_argument("--zh-path", default=DEFAULT_SOURCES["zh"])
+    parser.add_argument("--en-path", default=DEFAULT_SOURCES["en"])
+    parser.add_argument("--nl-path", default=DEFAULT_SOURCES["nl"])
     parser.add_argument(
         "--buffer-tokens",
         type=int,
@@ -100,53 +103,67 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
-        output_path.unlink()
+        output_path.unlink()  # Reset the bin file
 
-    sp = SentencePieceProcessor(model_file=args.tokenizer_path)
-    eos_id = sp.eos_id()
+    # ============ Load HuggingFace tokenizer (key change!) ============
+    print(f"Loading HuggingFace tokenizer from: {args.tokenizer_path}")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
+    print(f"  Vocab size: {len(tokenizer)}")
 
-    datasets_map = {
-        "zh": load_from_disk(args.zh_path)["train"],
-        "en": load_from_disk(args.en_path)["train"],
-        "nl": load_from_disk(args.nl_path)["train"],
-    }
-    cursors = {
-        lang: DatasetCursor(dataset, seed=args.seed + idx)
-        for idx, (lang, dataset) in enumerate(datasets_map.items())
-    }
+    # Get EOS token id (handle if not defined)
+    eos_id = tokenizer.eos_token_id
+    if eos_id is None:
+        # Fallback: use the </s> token id explicitly
+        eos_id = tokenizer.convert_tokens_to_ids("</s>")
+        print(f"  No eos_token_id, using </s> id: {eos_id}")
+    print(f"  EOS token id: {eos_id}")
 
-    ratio_sum = sum(DEFAULT_RATIOS.values())
+    # ============ Load datasets ============
+    paths = {"zh": args.zh_path, "en": args.en_path, "nl": args.nl_path}
+    datasets = {}
+    for lang, path in paths.items():
+        print(f"Loading {lang} dataset from {path}")
+        datasets[lang] = load_from_disk(path)
+        print(f"  Size: {len(datasets[lang]):,} documents")
+
+    cursors = {lang: DatasetCursor(datasets[lang], args.seed + i) for i, lang in enumerate(paths)}
+
+    # ============ Compute target token counts per language ============
+    total_ratio = sum(DEFAULT_RATIOS.values())
     target_counts = {
-        lang: int(args.budget * ratio / ratio_sum)
-        for lang, ratio in DEFAULT_RATIOS.items()
+        lang: int(args.budget * DEFAULT_RATIOS[lang] / total_ratio) for lang in DEFAULT_RATIOS
     }
-    target_counts["nl"] += args.budget - sum(target_counts.values())
+    print(f"Target token counts per language: {target_counts}")
 
+    # ============ Tokenize and write ============
     token_counts = {lang: 0 for lang in DEFAULT_RATIOS}
-    doc_counts = {lang: 0 for lang in DEFAULT_RATIOS}
     token_buffer = []
     total_tokens = 0
+    pbar = tqdm(total=args.budget, desc="Tokenizing", unit="tok")
 
-    pbar = tqdm(total=args.budget, desc="building multilingual bin", unit="tok")
     while total_tokens < args.budget:
         lang = choose_language(token_counts, target_counts)
         text = cursors[lang].next_text()
-        text_ids = sp.encode(text)
-        if not text_ids:
+        if not text:
             continue
+
+        # ============ HF tokenizer encode (key change!) ============
+        text_ids = tokenizer.encode(text, add_special_tokens=False)
         text_ids.append(eos_id)
 
-        remaining_total = args.budget - total_tokens
-        remaining_lang = target_counts[lang] - token_counts[lang]
-        allowed = min(len(text_ids), remaining_total, max(remaining_lang, 0))
-        if allowed <= 0:
-            continue
+        # Sanity check: ensure token IDs fit in uint16
+        if any(tid > 65535 or tid < 0 for tid in text_ids):
+            raise ValueError(f"Token id out of uint16 range encountered: max={max(text_ids)}")
 
-        token_buffer.extend(text_ids[:allowed])
-        token_counts[lang] += allowed
-        doc_counts[lang] += 1
-        total_tokens += allowed
-        pbar.update(allowed)
+        # Don't exceed budget
+        remaining = args.budget - total_tokens
+        if len(text_ids) > remaining:
+            text_ids = text_ids[:remaining]
+
+        token_buffer.extend(text_ids)
+        token_counts[lang] += len(text_ids)
+        total_tokens += len(text_ids)
+        pbar.update(len(text_ids))
 
         if len(token_buffer) >= args.buffer_tokens:
             flush_tokens(output_path, token_buffer)
@@ -154,14 +171,11 @@ def main():
     flush_tokens(output_path, token_buffer)
     pbar.close()
 
-    print(f"saved to: {output_path}")
-    print(f"total tokens: {total_tokens}")
-    for lang in ["zh", "en", "nl"]:
-        ratio = token_counts[lang] / max(total_tokens, 1)
-        print(
-            f"{lang}: tokens={token_counts[lang]} docs={doc_counts[lang]} "
-            f"share={ratio:.4f} dataset_passes={cursors[lang].epochs}"
-        )
+    print(f"\n=== Tokenization complete ===")
+    print(f"Final token counts: {token_counts}")
+    print(f"Total tokens written: {total_tokens:,}")
+    print(f"Output: {output_path}")
+    print(f"Output size: {output_path.stat().st_size:,} bytes")
 
 
 if __name__ == "__main__":
