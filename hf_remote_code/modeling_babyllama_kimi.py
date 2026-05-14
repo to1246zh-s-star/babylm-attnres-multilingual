@@ -324,13 +324,8 @@ class BabyLlamaKimiForCausalLM(PreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(self, input_ids, **kwargs):
         # no KV-cache implementation: always feed full context
         return {"input_ids": input_ids}
-cd /root/autodl-tmp/AttentionResidualLlama/out/hf_model_v1_100Mtokens
 
-# 备份
-cp modeling_babyllama_kimi.py modeling_babyllama_kimi.py.bak
 
-# 追加 SequenceClassification 类
-cat >> modeling_babyllama_kimi.py << 'EOF'
 
 
 # ============================================================
@@ -419,12 +414,3 @@ class BabyLlamaKimiForSequenceClassification(PreTrainedModel):
             hidden_states=None,
             attentions=None,
         )
-EOF
-
-# 验证追加成功
-echo "=== 文件总行数 ==="
-wc -l modeling_babyllama_kimi.py
-
-echo ""
-echo "=== 末尾 60 行 ==="
-tail -60 modeling_babyllama_kimi.py
